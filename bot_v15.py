@@ -1,0 +1,280 @@
+# TODO:
+# FOLLOWING TWO PROBLEMS:
+#   - wastefully combines past strength cap
+#   - singular target mentality becomes useless with large amounts of territory.
+#     lots of pieces in the middle are running around to different places, but pieces on the edges are already strong enough to take the target.
+# SOLUTION:
+#   - assign pieces to groups. Groups have a specific target.
+#   - only enough total strength to barely take the target
+#   - additional problems: avoiding collisions between groups. how?
+#
+# - seed 1907675159 against v.1 snapshot shows a huge weakness when fighthing enemies. (replay saved as bad_engage_loop)
+#   - needs special case handling if target is owned by enemy / if it's strength 0 (should be basically the same)
+#   - just needs to consider any nearby enemy's strength in addition.
+
+from hlt import (
+    Location,
+    Move,
+    DIRECTIONS,
+    CARDINALS,
+    STILL,
+    NORTH,
+    EAST,
+    SOUTH,
+    WEST,
+
+)
+
+from networking import (
+    getFrame as get_frame,
+    getInit as get_init,
+    sendFrame as send_frame,
+    sendInit as send_init,
+)
+import random
+import logging
+import functools
+import traceback
+
+ACT_DIRECTIONS = list(range(1, 5))
+logging.basicConfig(filename="vdot15_garbage.log")
+log = logging.getLogger()
+log.setLevel(logging.DEBUG)
+
+def init():
+    my_id, game_map = get_init()
+    data = {"piece_locs": [], "target_loc": None, "edges": []}
+    for y in range(game_map.height):
+        for x in range(game_map.width):
+            location = Location(x, y)
+            site = game_map.getSite(location)
+            if site.owner == my_id:
+                data["piece_locs"].append(location)
+
+    nearby = get_nearby_owned_pieces(0, game_map, data["piece_locs"][0])
+    data["edges"] = nearby
+    data["target"] = get_weakest_site(nearby)
+    data["target_loc"] = data["target"][0]
+
+    send_init("worthless garbage NEET v.15")
+    return my_id, game_map, data
+
+
+def get_nearby_pieces(gmap, location):
+    """Returns a list of (location, Site) tuples."""
+    nearby_sites = [gmap.getSite(location, d) for d in ACT_DIRECTIONS]
+    nearby_locations = [gmap.getLocation(location, d) for d in ACT_DIRECTIONS]
+    tuples = list(zip(nearby_locations, nearby_sites))
+    return tuples
+
+
+def get_nearby_owned_pieces(cid, gmap, location):
+    """Returns a list of (location, Site) tuples with sites owned by cid."""
+    tuples = get_nearby_pieces(gmap, location)
+    neutral_tuples = [t for t in tuples if t[1].owner == cid]
+    return neutral_tuples
+
+
+def get_weakest_site(pieces):
+    """Accepts a list of tuples of form (*, site).
+    Returns a single (*, site) tuple where site has the lowest strength of all sites in the list."""
+    weakest = min([(x, site) for x, site in pieces], key=lambda x: x[1].strength)
+    return weakest
+
+
+def get_total_strength(pieces):
+    return sum([piece[1].strength for piece in pieces])
+
+
+def get_farthest_piece(gmap, pieces, target):
+    farthest = max([(gmap.getDistance(loc, target), (loc, piece)) for loc, piece in pieces], key=lambda x: x[0])
+    return farthest[1]
+
+
+def get_closest_piece(gmap, pieces, target):
+    closest = min([(gmap.getDistance(loc, target), (loc, piece)) for loc, piece in pieces], key=lambda x: x[0])
+    return closest[1]
+
+
+def sort_pieces_by_distance(gmap, pieces, target, ascending=True):
+    """Sorts pieces, doesn't return distance, only ordered pieces."""
+    sort = [(gmap.getDistance(loc, target), (loc, piece)) for loc, piece in pieces].sort(key=lambda x: x[0], reverse=not(ascending))
+    res = [r[1] for r in sort]
+    return res
+
+
+def find_allied_path(gmap, my_id, loc, target):
+    # shitty non-working pathfinding.
+    nearby_allied = get_nearby_owned_pieces(my_id, gmap, loc)
+    best = get_closest_piece(gmap, nearby_allied, target)
+    return get_direction(gmap, loc, best[0])
+
+
+def get_direction(gmap, loc, target):
+    if gmap.getDistance(loc, target) != 1:
+        return None
+    for d in ACT_DIRECTIONS:
+        if gmap.getLocation(loc, d) == target:
+            return d
+
+
+# ------------------------------------------------------------------------------------------
+
+
+def take_turn(my_id, game_map, data):
+    get_nearby_neutral_pieces = functools.partial(get_nearby_owned_pieces, 0)
+    get_nearby_allied_pieces = functools.partial(get_nearby_owned_pieces, my_id)
+    under_attack = False
+    data["pieces"] = []
+    data["edges"] = []
+
+    def get_updated_pieces(my_id, game_map, data):
+        def update_pieces():
+            unique = []
+            # dedup necessary due to new "wing-it" attack code
+            for loc in data["piece_locs"]:
+                if loc not in unique:
+                    unique.append(loc)
+                else:
+                    log.debug("PIECE WAS LOST TO DEDUP")
+            data["piece_locs"] = unique
+            for loc in data["piece_locs"]:
+                site = game_map.getSite(loc)
+                if site.owner != my_id:
+                    log.debug("\tREMOVING LOC from piece_locs: {} ({})".format(loc, site))
+                    log.debug("\t\treason: owner has changed")
+                    under_attack = True
+                    data["piece_locs"].remove(loc)
+                else:
+                    data["pieces"].append((loc, site))
+
+        def update_edges():
+            existing_locs = []
+            unique_edges = []
+            edges = sum([get_nearby_pieces(game_map, piece[0]) for piece in data["pieces"]], [])
+            for loc, edge in edges:
+                if edge.owner != my_id and loc not in existing_locs:
+                    existing_locs.append(loc)
+                    unique_edges.append((loc, edge))
+            data["edges"] = unique_edges
+
+        def update_target():
+            target = game_map.getSite(data["target_loc"])
+            adjacent_allied = [p for p in get_nearby_pieces(game_map, data["target_loc"]) if p[1].owner == my_id]
+
+            if target.owner == my_id or not adjacent_allied:
+                data["target_loc"] = None
+                data["target"] = None
+            else:
+                data["target"] = (data["target_loc"], target)
+
+        update_pieces()
+        update_edges()
+        update_target()
+
+        return data
+
+    def return_or_find_target(my_id, game_map, data):
+        if data["target"] is not None:
+            return data["target"]
+        new_target = get_weakest_site(data["edges"])
+        data["target"] = new_target
+        data["target_loc"] = data["target"][0]
+        return new_target
+
+    def _refresh_target(my_id, game_map, data):
+        data["piece_locs"].append(data["target"][0])
+        # recalculate edges, only excluding the current target.
+        existing_locs = [data["target_loc"]]
+        unique_edges = []
+        for loc, edge in get_nearby_neutral_pieces(game_map, data["target_loc"]) + data["edges"]:
+            if edge.owner != my_id and loc not in existing_locs:
+                existing_locs.append(loc)
+                unique_edges.append((loc, edge))
+
+        data["edges"] = unique_edges
+        data["target_loc"] = None
+        data["target"] = None
+        data["target"] = return_or_find_target(my_id, game_map, data)
+        data["target_loc"] = data["target"][0]
+        return data
+
+    def attack_target_or_wait(my_id, game_map, data):
+        moves = []
+        if get_total_strength(data["pieces"]) > data["target"][1].strength:
+            # attack
+            adjacent_allied = [p for p in get_nearby_pieces(game_map, data["target"][0]) if p[1].owner == my_id]
+            if not adjacent_allied:
+                data = _refresh_target(my_id, game_map, data)
+                adjacent_allied = [p for p in get_nearby_pieces(game_map, data["target"][0]) if p[1].owner == my_id]
+            adjacent_loc = [p[0] for p in adjacent_allied]
+            non_adjacent_allied = [p for p in data["pieces"] if p[0] not in adjacent_loc]
+
+            if get_total_strength(adjacent_allied) > data["target"][1].strength:
+                for l, s in adjacent_allied:
+                    moves.append(Move(l, get_direction(game_map, l, data["target"][0])))
+
+                data = _refresh_target(my_id, game_map, data)
+                if get_total_strength(non_adjacent_allied) < data["target"][1].strength:
+                    for l, s in non_adjacent_allied:
+                        moves.append(Move(l, STILL))
+                    return moves
+            else:
+                for l, s in adjacent_allied:
+                    moves.append(Move(l, STILL))
+
+            for l, s in non_adjacent_allied:
+                # don't move 0-strength pieces, always a waste.
+                if s.strength == 0:
+                    moves.append(Move(l, STILL))
+                    continue
+
+                # if you can kill something right now, do it.
+                kill_nearby = False
+                nearby = get_nearby_neutral_pieces(game_map, l)
+                for nl, ns in nearby:
+                    if s.strength > ns.strength:
+                        moves.append(Move(l, get_direction(game_map, l, nl)))
+                        data["piece_locs"].append(nl)
+                        kill_nearby = True
+                        break
+                if kill_nearby:
+                    continue
+
+                # back to target-seeking behavior
+                nearest_adj = get_closest_piece(game_map, adjacent_allied, l)
+                moves.append(Move(l, find_allied_path(game_map, my_id, l, nearest_adj[0])))
+
+        else:
+            log.debug("WAITED")
+            for l, s in data["pieces"]:
+                moves.append(Move(l, STILL))
+
+        return moves
+
+    data = get_updated_pieces(my_id, game_map, data)
+    target = return_or_find_target(my_id, game_map, data)
+    moves = attack_target_or_wait(my_id, game_map, data)
+    log.debug("\n\ttarget:{}".format(target))
+    log.debug("\n\tmoves:{}".format([(m.loc, m.direction) for m in moves]))
+    send_frame(moves)
+
+    return data
+
+
+if __name__ == "__main__":
+    log.debug("in main")
+    try:
+        mid, gmap, data = init()
+        frame = 0
+        while True:
+            log.debug("frame:{}".format(frame))
+            gmap = get_frame()
+            data = take_turn(mid, gmap, data)
+            log.debug("new data: {}".format(data))
+            frame += 1
+    except Exception as e:
+        ex = traceback.format_exc()
+        log.debug(ex)
+        # this makes the game env stop.
+        print("done fucked up.")

@@ -1,0 +1,6 @@
+*.log
+*.hlt
+*.swp
+*.swo
+replays/
+__pycache__
