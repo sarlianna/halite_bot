@@ -72,9 +72,9 @@ def init():
     data["targets"].append(get_weakest_site(nearby))
     data["target_locs"].append(data["targets"][0][0])
 
+    log.debug(data["target_locs"])
     send_init("worthless garbage NEET")
     return my_id, game_map, data
-
 
 
 def take_turn(my_id, game_map, data):
@@ -83,6 +83,7 @@ def take_turn(my_id, game_map, data):
     under_attack = False
     data["pieces"] = []
     data["edges"] = []
+    data["targets"] = []
 
     def get_updated_pieces(my_id, game_map, data):
         def update_pieces():
@@ -107,11 +108,15 @@ def take_turn(my_id, game_map, data):
             data["edges"] = unique_edges
 
         def update_targets():
+            log.debug("UPDATING TARGETS")
+            log.debug(data["target_locs"])
             for loc in data["target_locs"]:
                 target = game_map.getSite(loc)
                 adjacent_allied = [p for p in get_nearby_pieces(game_map, loc) if p[1].owner == my_id]
 
+                log.debug("FOUND TARGET: {}".format(target))
                 if target.owner != my_id and adjacent_allied:
+                    log.debug("TARGET ADJACENT AND NOT OWNED BY ME, ADDING TO TARGETS.")
                     data["targets"].append((loc, target))
 
         update_pieces()
@@ -135,12 +140,23 @@ def take_turn(my_id, game_map, data):
                 index = 0
                 for i in range(len(closest_remaining)):
                     strength += closest_remaining[i][1].strength
-                    if strength > target[1].strength or i == len(closest_remaining) - 1:
+                    if strength > target[1].strength:
+                        log.debug("final strength: {}".format(strength))
                         index = i
                         break
-                assigned_pieces.append((target, closest_remaining[:index]))
-                remaining_pieces = closest_remaining[index:]
-                return assigned_pieces
+                if index == 0:
+                    assigned_pieces += closest_remaining
+                    remaining_pieces = []
+                else:
+                    log.debug("index: {}".format(index))
+                    log.debug("resulting list: {}".format(closest_remaining[:index]))
+                    assigned_pieces += closest_remaining[:index]
+                    remaining_pieces = closest_remaining[index + 1:]
+                log.debug("ASSIGNING PIECES TO TARGET:")
+                str_total = sum([p[1].strength for p in assigned_pieces])
+                log.debug("target: {} -- total assigned: {} -- assigned strength: {}".format(target, len(assigned_pieces), str_total))
+                log.debug("remaining pieces: {}".format(len(remaining_pieces)))
+                return (target, assigned_pieces)
 
             if not data["targets"]:
                 new_target = get_weakest_site(data["edges"])
@@ -148,31 +164,46 @@ def take_turn(my_id, game_map, data):
                 data["target_locs"].append(new_target[0])
 
             for target in data["targets"]:
-                log.debug("remaining_pieces {}".format(remaining_pieces))
                 if not remaining_pieces:
                     break
                 assigned = assign_pieces_to_target(remaining_pieces, target)
                 assigned_pieces.append(assigned)
-                log.debug(assigned)
                 for p in assigned[1]:
-                    remaining_pieces.remove(p)
+                    if p in remaining_pieces:
+                        remaining_pieces.remove(p)
 
             # if there's still pieces, add new targets.
             log.debug("remaining_pieces {}".format(remaining_pieces))
             while remaining_pieces:
+                log.debug("MAKING NEW TARGETS")
+                log.debug(remaining_pieces)
                 possible_targets = find_unallied_edges(game_map, my_id, remaining_pieces)
+                possible_targets = [(l, t) for l, t in possible_targets if l not in data["target_locs"]]
+                if not possible_targets:
+                    break
                 new_target = get_weakest_site(possible_targets)
                 data["targets"].append(new_target)
                 data["target_locs"].append(new_target[0])
-                ap, remaining_pieces = assign_pieces_to_target(remaining_pieces, target)
-                assigned_pieces.append(ap)
-                log.debug("remaining_pieces {}".format(remaining_pieces))
+                assigned = assign_pieces_to_target(remaining_pieces, target)
+                assigned_pieces.append(assigned)
+                for p in assigned[1]:
+                    if p in remaining_pieces:
+                        remaining_pieces.remove(p)
 
             return assigned_pieces
 
         def _update_attacked_target(target):
-            data["target_locs"].remove(target[0])
-            data["piece_locs"].append(target[0])
+            log.debug("TRYING TO REMOVE THIS TARGET: {}".format(target))
+            if target[0] in data["target_locs"]:
+                data["target_locs"].remove(target[0])
+            else:
+                log.debug("TARGET NOT IN target_locs")
+                log.debug("Current target_locs: {}".format(data["target_locs"]))
+            if target[0] not in data["piece_locs"]:
+                data["piece_locs"].append(target[0])
+            else:
+                log.debug("TARGET IN piece_locs already")
+                log.debug("Current piece_locs: {}".format(data["piece_locs"]))
 
         def attack_target_with_pieces(my_id, game_map, pieces, target):
             adjacent_allied = [p for p in get_nearby_pieces(game_map, target[0]) if p[1].owner == my_id]
@@ -218,7 +249,7 @@ def take_turn(my_id, game_map, data):
 
     data = get_updated_pieces(my_id, game_map, data)
     moves = generate_moves(my_id, game_map, data)
-    log.debug("\n\ttarget:{}".format(target))
+    log.debug("\n\ttargets:{}".format([(t[0], t[1]) for t in data["targets"]]))
     log.debug("\n\tmoves:{}".format([(m.loc, m.direction) for m in moves]))
     send_frame(moves)
 
@@ -240,5 +271,4 @@ if __name__ == "__main__":
         ex = traceback.format_exc()
         log.debug(ex)
         # this makes the game env stop.
-        print("done fucked up.")
         print("done fucked up.")
